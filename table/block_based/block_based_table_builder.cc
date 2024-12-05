@@ -12,6 +12,7 @@
 #include <atomic>
 #include <cassert>
 #include <cstdio>
+#include <iostream>
 #include <list>
 #include <map>
 #include <memory>
@@ -520,6 +521,19 @@ struct BlockBasedTableBuilder::Rep {
       buffer_limit = std::min(tbo.target_file_size,
                               compression_opts.max_dict_buffer_bytes);
     }
+
+    /* Verify that the correct data block index type is actually being used */
+    auto data_block_index_type = (tbo.internal_comparator.user_comparator()
+                                  ->CanKeysWithDifferentByteContentsBeEqual() &&
+                                  !tbo.internal_comparator.user_comparator()
+                                  ->KeysAreBytewiseComparableOtherThanTimestamp())
+                                  ? BlockBasedTableOptions::kDataBlockBinarySearch
+                                  : table_options.data_block_index_type;
+    std::cout << "\n>>> START DATA BLOCK INDEX TYPE <<<\n";
+    std::cout << "kDataBlockBinarySearch set: " << (data_block_index_type == BlockBasedTableOptions::kDataBlockBinarySearch) << "\n";
+    std::cout << "kDataBlockBinaryAndHash set: " << (data_block_index_type == BlockBasedTableOptions::kDataBlockBinaryAndHash) << "\n";
+    std::cout << ">>> END DATA BLOCK INDEX TYPE <<<\n\n";
+    std::cout.flush();
 
     const auto compress_dict_build_buffer_charged =
         table_options.cache_usage_options.options_overrides

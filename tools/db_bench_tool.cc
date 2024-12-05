@@ -350,7 +350,7 @@ static bool ValidateUint32Range(const char* flagname, uint64_t value) {
 
 DEFINE_int32(key_size, 16, "size of each key");
 
-DEFINE_int32(user_timestamp_size, 0,
+DEFINE_int32(user_timestamp_size, 4,
              "number of bytes in a user-defined timestamp");
 
 DEFINE_int32(num_multi_db, 0,
@@ -699,13 +699,13 @@ DEFINE_int32(format_version,
              "Format version of SST files.");
 
 DEFINE_int32(block_restart_interval,
-             ROCKSDB_NAMESPACE::BlockBasedTableOptions().block_restart_interval,
+             ROCKSDB_NAMESPACE::BlockBasedTableOptions().block_restart_interval,    /* 16 */
              "Number of keys between restart points "
              "for delta encoding of keys in data block.");
 
 DEFINE_int32(
     index_block_restart_interval,
-    ROCKSDB_NAMESPACE::BlockBasedTableOptions().index_block_restart_interval,
+    16,
     "Number of keys between restart points "
     "for delta encoding of keys in index block.");
 
@@ -732,12 +732,12 @@ DEFINE_uint32(uncache_aggressiveness,
               "obsolete. 0 = disabled, 1 = minimum, 100 = moderate, 10000 = "
               "normal max");
 
-DEFINE_bool(use_data_block_hash_index, false,
+DEFINE_bool(use_data_block_hash_index, true,
             "if use kDataBlockBinaryAndHash "
             "instead of kDataBlockBinarySearch. "
             "This is valid if only we use BlockTable");
 
-DEFINE_double(data_block_hash_table_util_ratio, 0.75,
+DEFINE_double(data_block_hash_table_util_ratio, 1.0,
               "util ratio for data block hash index table. "
               "This is only valid if use_data_block_hash_index is "
               "set to true");
@@ -2643,22 +2643,22 @@ class CombinedStats {
 
 class TimestampEmulator {
  private:
-  std::atomic<uint64_t> timestamp_;
+  std::atomic<uint32_t> timestamp_;
 
  public:
   TimestampEmulator() : timestamp_(0) {}
-  uint64_t Get() const { return timestamp_.load(); }
+  uint32_t Get() const { return timestamp_.load(); }
   void Inc() { timestamp_++; }
   Slice Allocate(char* scratch) {
     // TODO: support larger timestamp sizes
-    assert(FLAGS_user_timestamp_size == 8);
+    assert(FLAGS_user_timestamp_size == 4);
     assert(scratch);
     uint64_t ts = timestamp_.fetch_add(1);
     EncodeFixed64(scratch, ts);
     return Slice(scratch, FLAGS_user_timestamp_size);
   }
   Slice GetTimestampForRead(Random64& rand, char* scratch) {
-    assert(FLAGS_user_timestamp_size == 8);
+    assert(FLAGS_user_timestamp_size == 4);
     assert(scratch);
     if (FLAGS_read_with_latest_user_timestamp) {
       return Allocate(scratch);
@@ -2743,9 +2743,9 @@ class Duration {
   uint64_t start_at_;
 };
 
-class ComparatorWithTimestamp : public Comparator {
+class ComparatorWithU32Timestamp : public Comparator {
  public:
-  explicit ComparatorWithTimestamp() noexcept : Comparator(/*ts_sz=*/sizeof(uint32_t)) {
+  explicit ComparatorWithU32Timestamp() noexcept : Comparator(/*ts_sz=*/sizeof(uint32_t)) {
     assert(cmp_without_ts_->timestamp_size() == 0);
   }
 
@@ -2834,7 +2834,7 @@ class Benchmark {
   bool use_blob_db_;    // Stacked BlobDB
   bool read_operands_;  // read via GetMergeOperands()
   std::vector<std::string> keys_;
-  ComparatorWithTimestamp cmp_;
+  ComparatorWithU32Timestamp cmp_;
 
   class ErrorHandlerListener : public EventListener {
    public:
@@ -3373,8 +3373,6 @@ class Benchmark {
     if (user_timestamp_size_ > 0) {
       mock_app_clock_.reset(new TimestampEmulator());
     }
-
-    open_options_.comparator = &cmp_;
   }
 
   void DeleteDBs() {
@@ -4785,11 +4783,7 @@ class Benchmark {
     }
 
     if (FLAGS_user_timestamp_size > 0) {
-      if (FLAGS_user_timestamp_size != 8) {
-        fprintf(stderr, "Only 64 bits timestamps are supported.\n");
-        exit(1);
-      }
-      options.comparator = test::BytewiseComparatorWithU64TsWrapper();
+      options.comparator = &cmp_;
     }
 
     options.allow_data_in_errors = FLAGS_allow_data_in_errors;
@@ -7900,10 +7894,8 @@ class Benchmark {
   // Read-heavy workload that operates on keys and timestamps that are
   // monotonically increasing.
   void SeqKeysAndTimestamps(ThreadState* thread) {
-    user_timestamp_size_ = 4;
-
-    int64_t ts = 0;  /* Timestamp */
-    int64_t key_int = 0;  /* Key */
+    uint32_t ts = 0;  /* Timestamp */
+    uint32_t key_int = 0;  /* Key */
     std::string read_timestamp(user_timestamp_size_, '\0');    /* Used to encode ts during reads */
     std::string write_timestamp(user_timestamp_size_, '\0');   /* Used to encode ts during writes */
 
@@ -7916,10 +7908,7 @@ class Benchmark {
 
     std::unique_ptr<const char[]> key_guard;
     Slice key = AllocateKey(&key_guard);
-    std::unique_ptr<char[]> ts_guard;
-    if (user_timestamp_size_ > 0) {
-      ts_guard.reset(new char[user_timestamp_size_]);
-    }
+    Slice val = gen.Generate();
 
     // The number of iterations is the larger of read_ or write_
     while (!duration.Done(1)) {
@@ -7928,7 +7917,6 @@ class Benchmark {
 
       /* Generate monotonically increasing key and random value */
       GenerateKeyFromInt(++key_int, FLAGS_num, &key);
-      Slice val = gen.Generate();
 
       /* Encode the current ts in write_slice and increment ts */
       EncodeFixed32(write_timestamp.data(), ++ts);

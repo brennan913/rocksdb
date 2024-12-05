@@ -430,7 +430,7 @@ function get_cmd() {
     fi
   fi
 
-  echo "/usr/bin/time -f '%e %U %S' -o $output $numa $timeout_cmd"
+  echo "/usr/bin/time -o $output $numa $timeout_cmd"
 }
 
 function month_to_num() {

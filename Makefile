@@ -17,6 +17,8 @@ LDFLAGS += $(EXTRA_LDFLAGS)
 MACHINE ?= $(shell uname -m)
 ARFLAGS = ${EXTRA_ARFLAGS} rs
 STRIPFLAGS = -S -x
+CXXFLAGS += -DGFLAGS -I/opt/homebrew/Cellar/gflags/2.2.2/include -DZSTD -I/opt/homebrew/Cellar/zstd/1.5.6/include
+LDFLAGS += -lgflags -L/opt/homebrew/Cellar/gflags/2.2.2/lib -lzstd -L/opt/homebrew/Cellar/zstd/1.5.6/lib
 
 # Transform parallel LOG output into something more readable.
 perl_command = perl -n \
