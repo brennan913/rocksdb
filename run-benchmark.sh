@@ -21,7 +21,7 @@ sudo chmod 777 $DATA_DIR $WAL_DIR $DB_DIR $report $schedule
 
 # Set benchmark parameters
 export LD_LIBRARY_PATH=/Users/ryanwee/brennan_rocksdb:$LD_LIBRARY_PATH
-export BLOCK_SIZE=$((16 << 10))         # 16 MiB
+export BLOCK_SIZE=$((16 << 10))         # 16 KiB
 export CACHE_SIZE=$((16 << 30))         # 16 GiB
 export BLOB_CACHE_SIZE=$((16 << 30))    # 16 GiB
 export NUM_KEYS=5000
