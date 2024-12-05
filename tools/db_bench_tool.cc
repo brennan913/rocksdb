@@ -138,6 +138,7 @@ DEFINE_string(
     "readwhilescanning,"
     "readrandomwriterandom,"
     "updaterandom,"
+    "seqkeystimestamps,"
     "xorupdaterandom,"
     "approximatesizerandom,"
     "randomwithverify,"
@@ -194,6 +195,8 @@ DEFINE_string(
     "keys\n"
     "\txorupdaterandom  -- N threads doing read-XOR-write for "
     "random keys\n"
+    "\tseqkeystimestamps -- N threads doing a a read-heavy workload on "
+    "sequential keys and timestamps\n"
     "\tappendrandom  -- N threads doing read-modify-write with "
     "growing values\n"
     "\tmergerandom   -- same as updaterandom/appendrandom using merge"
@@ -2740,6 +2743,64 @@ class Duration {
   uint64_t start_at_;
 };
 
+class ComparatorWithTimestamp : public Comparator {
+ public:
+  explicit ComparatorWithTimestamp() noexcept : Comparator(/*ts_sz=*/sizeof(uint32_t)) {
+    assert(cmp_without_ts_->timestamp_size() == 0);
+  }
+
+  // The comparator that compares the user key without timestamp part is treated
+  // as the root comparator.
+  [[nodiscard]] const Comparator* GetRootComparator() const override { return cmp_without_ts_; }
+
+  void FindShortSuccessor(std::string* /*key*/) const override {}
+  void FindShortestSeparator(std::string* /*start*/, const rocksdb::Slice& /*limit*/) const override {}
+  [[nodiscard]] int Compare(const rocksdb::Slice& a, const rocksdb::Slice& b) const override {
+    const int ret = CompareWithoutTimestamp(a, b);
+    const size_t ts_sz = timestamp_size();
+    if (ret != 0) {
+      return ret;
+    }
+    // Compare timestamp.
+    // For the same user key with different timestamps, larger (newer) timestamp
+    // comes first.
+    return -CompareTimestamp(ExtractTimestampFromUserKey(a, ts_sz), ExtractTimestampFromUserKey(b, ts_sz));
+  }
+
+  using Comparator::CompareWithoutTimestamp;
+  [[nodiscard]] int CompareWithoutTimestamp(const rocksdb::Slice& a, bool a_has_ts, const rocksdb::Slice& b,
+      bool b_has_ts) const override {
+    const size_t ts_sz = timestamp_size();
+    assert(!a_has_ts || a.size() >= ts_sz);
+    assert(!b_has_ts || b.size() >= ts_sz);
+    const rocksdb::Slice lhs = a_has_ts ? StripTimestampFromUserKey(a, ts_sz) : a;
+    const rocksdb::Slice rhs = b_has_ts ? StripTimestampFromUserKey(b, ts_sz) : b;
+    return cmp_without_ts_->Compare(lhs, rhs);
+  }
+
+  [[nodiscard]] int CompareTimestamp(const rocksdb::Slice& ts1, const rocksdb::Slice& ts2) const override {
+    assert(ts1.size() == sizeof(uint32_t));
+    assert(ts2.size() == sizeof(uint32_t));
+    const auto lhs = DecodeFixed32(ts1.data());
+    const auto rhs = DecodeFixed32(ts2.data());
+    if (lhs < rhs) {
+      return -1;
+    } else if (lhs > rhs) {
+      return 1;
+    } else {
+      return 0;
+    }
+  }
+
+  /* COMMENT OUT THIS LINE TO TEST PERFORMANCE WITHOUT THE HASH INDEX */
+  [[nodiscard]] bool KeysAreBytewiseComparableOtherThanTimestamp() const override { return true; }
+
+  [[nodiscard]] const char* Name() const override { return "name"; }
+
+ private:
+  const rocksdb::Comparator* cmp_without_ts_ = rocksdb::BytewiseComparator();
+};
+
 class Benchmark {
  private:
   std::shared_ptr<Cache> cache_;
@@ -2773,6 +2834,7 @@ class Benchmark {
   bool use_blob_db_;    // Stacked BlobDB
   bool read_operands_;  // read via GetMergeOperands()
   std::vector<std::string> keys_;
+  ComparatorWithTimestamp cmp_;
 
   class ErrorHandlerListener : public EventListener {
    public:
@@ -3311,6 +3373,8 @@ class Benchmark {
     if (user_timestamp_size_ > 0) {
       mock_app_clock_.reset(new TimestampEmulator());
     }
+
+    open_options_.comparator = &cmp_;
   }
 
   void DeleteDBs() {
@@ -3674,6 +3738,8 @@ class Benchmark {
         method = &Benchmark::ReadRandomMergeRandom;
       } else if (name == "updaterandom") {
         method = &Benchmark::UpdateRandom;
+      } else if (name == "seqkeystimestamps") {
+        method = &Benchmark::SeqKeysAndTimestamps;
       } else if (name == "xorupdaterandom") {
         method = &Benchmark::XORUpdateRandom;
       } else if (name == "appendrandom") {
@@ -7829,6 +7895,89 @@ class Benchmark {
       assert(iter->Valid() && iter->key() == key);
       thread->stats.FinishedOps(nullptr, db, 1, kSeek);
     }
+  }
+
+  // Read-heavy workload that operates on keys and timestamps that are
+  // monotonically increasing.
+  void SeqKeysAndTimestamps(ThreadState* thread) {
+    user_timestamp_size_ = 4;
+
+    int64_t ts = 0;  /* Timestamp */
+    int64_t key_int = 0;  /* Key */
+    std::string read_timestamp(user_timestamp_size_, '\0');    /* Used to encode ts during reads */
+    std::string write_timestamp(user_timestamp_size_, '\0');   /* Used to encode ts during writes */
+
+    ReadOptions options = read_options_;
+    RandomGenerator gen;
+    std::string value;
+    int64_t found = 0;
+    int64_t bytes = 0;
+    Duration duration(FLAGS_duration, readwrites_);
+
+    std::unique_ptr<const char[]> key_guard;
+    Slice key = AllocateKey(&key_guard);
+    std::unique_ptr<char[]> ts_guard;
+    if (user_timestamp_size_ > 0) {
+      ts_guard.reset(new char[user_timestamp_size_]);
+    }
+
+    // The number of iterations is the larger of read_ or write_
+    while (!duration.Done(1)) {
+      DB* db = SelectDB(thread);
+      Status s;
+
+      /* Generate monotonically increasing key and random value */
+      GenerateKeyFromInt(++key_int, FLAGS_num, &key);
+      Slice val = gen.Generate();
+
+      /* Encode the current ts in write_slice and increment ts */
+      EncodeFixed32(write_timestamp.data(), ++ts);
+      const Slice write_slice(write_timestamp);
+
+      /* Do a put with the timestamp */
+      s = db->Put(write_options_, key, write_slice, val);
+      if (!s.ok()) {
+        fprintf(stderr, "put error: %s\n", s.ToString().c_str());
+        exit(1);
+      }
+      bytes += key.size() + val.size() + user_timestamp_size_;
+      if (thread->shared->write_rate_limiter) {
+        thread->shared->write_rate_limiter->Request(
+            key.size() + value.size(), Env::IO_HIGH, nullptr /*stats*/,
+            RateLimiter::OpType::kWrite);
+      }
+
+      /* Do 100 reads with monotonically increasing timestamps */
+      for (int i = 0; i < 100; ++i) {
+        /* Encode the current ts in read_slice and increment ts */
+        EncodeFixed32(read_timestamp.data(), ++ts);
+        const Slice read_slice(read_timestamp);
+
+        /* Do a read with the timestamp */
+        options.timestamp = &read_slice;
+        auto status = db->Get(options, key, &value);
+        if (status.ok()) {
+          ++found;
+          bytes += key.size() + value.size() + user_timestamp_size_;
+        } else if (!status.IsNotFound()) {
+          fprintf(stderr, "Get returned an error: %s\n",
+                  status.ToString().c_str());
+          abort();
+        }
+        if (thread->shared->read_rate_limiter.get() != nullptr) {
+          thread->shared->read_rate_limiter->Request(
+          100, Env::IO_HIGH, nullptr /* stats */, RateLimiter::OpType::kRead);
+        }
+      }
+
+      thread->stats.FinishedOps(nullptr, db, 1, kUpdate);
+    }
+
+    char msg[100];
+    snprintf(msg, sizeof(msg), "( updates:%" PRIu64 " found:%" PRIu64 ")",
+             readwrites_, found);
+    thread->stats.AddBytes(bytes);
+    thread->stats.AddMessage(msg);
   }
 
   bool binary_search(std::vector<int>& data, int start, int end, int key) {

@@ -1134,6 +1134,8 @@ for job in ${jobs[@]}; do
     run_change overwriteandwait overwrite overwrite,waitforcompaction
   elif [ $job = updaterandom ]; then
     run_change updaterandom updaterandom updaterandom
+  elif [ $job = seqkeystimestamps ]; then
+    run_change seqkeystimestamps seqkeystimestamps seqkeystimestamps
   elif [ $job = mergerandom ]; then
     run_change mergerandom mergerandom mergerandom
   elif [ $job = filluniquerandom ]; then
