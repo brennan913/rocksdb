@@ -7,7 +7,16 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
 
-#ifdef GFLAGS
+// Define this macro to use our custom timestamp comparator
+// #define BENCHMARK_USING_CUSTOM_COMPARATOR
+
+#ifdef BENCHMARK_USING_CUSTOM_COMPARATOR
+#define TIMESTAMP_SIZE 4
+#else   /* #ifdef BENCHMARK_USING_CUSTOM_COMPARATOR */
+#define TIMESTAMP_SIZE 8
+#endif  /* #ifdef BENCHMARK_USING_CUSTOM_COMPARATOR */
+
+// #ifdef GFLAGS
 #ifdef NUMA
 #include <numa.h>
 #endif
@@ -350,7 +359,7 @@ static bool ValidateUint32Range(const char* flagname, uint64_t value) {
 
 DEFINE_int32(key_size, 16, "size of each key");
 
-DEFINE_int32(user_timestamp_size, 4,
+DEFINE_int32(user_timestamp_size, 0,
              "number of bytes in a user-defined timestamp");
 
 DEFINE_int32(num_multi_db, 0,
@@ -2643,22 +2652,38 @@ class CombinedStats {
 
 class TimestampEmulator {
  private:
+#ifdef BENCHMARK_USING_CUSTOM_COMPARATOR
   std::atomic<uint32_t> timestamp_;
+#else
+  std::atomic<uint64_t> timestamp_;
+#endif
 
  public:
   TimestampEmulator() : timestamp_(0) {}
+#ifdef BENCHMARK_USING_CUSTOM_COMPARATOR
   uint32_t Get() const { return timestamp_.load(); }
+#else   /* ifdef BENCHMARK_USING_CUSTOM_COMPARATOR */
+  uint64_t Get() const { return timestamp_.load(); }
+#endif  /* ifdef BENCHMARK_USING_CUSTOM_COMPARATOR */
   void Inc() { timestamp_++; }
   Slice Allocate(char* scratch) {
     // TODO: support larger timestamp sizes
+#ifdef BENCHMARK_USING_CUSTOM_COMPARATOR
     assert(FLAGS_user_timestamp_size == 4);
+#else   /* ifdef BENCHMARK_USING_CUSTOM_COMPARATOR */
+    assert(FLAGS_user_timestamp_size == 8);
+#endif  /* ifdef BENCHMARK_USING_CUSTOM_COMPARATOR */
     assert(scratch);
     uint64_t ts = timestamp_.fetch_add(1);
     EncodeFixed64(scratch, ts);
     return Slice(scratch, FLAGS_user_timestamp_size);
   }
   Slice GetTimestampForRead(Random64& rand, char* scratch) {
+#ifdef BENCHMARK_USING_CUSTOM_COMPARATOR
     assert(FLAGS_user_timestamp_size == 4);
+#else   /* ifdef BENCHMARK_USING_CUSTOM_COMPARATOR */
+    assert(FLAGS_user_timestamp_size == 8);
+#endif  /* ifdef BENCHMARK_USING_CUSTOM_COMPARATOR */
     assert(scratch);
     if (FLAGS_read_with_latest_user_timestamp) {
       return Allocate(scratch);
@@ -4783,7 +4808,11 @@ class Benchmark {
     }
 
     if (FLAGS_user_timestamp_size > 0) {
+#ifdef BENCHMARK_USING_CUSTOM_COMPARATOR
       options.comparator = &cmp_;
+#else   /* ifdef BENCHMARK_USING_CUSTOM_COMPARATOR */
+      options.comparator = test::BytewiseComparatorWithU64TsWrapper();
+#endif  /* ifdef BENCHMARK_USING_CUSTOM_COMPARATOR */
     }
 
     options.allow_data_in_errors = FLAGS_allow_data_in_errors;
@@ -8934,4 +8963,4 @@ int db_bench_tool(int argc, char** argv) {
   return 0;
 }
 }  // namespace ROCKSDB_NAMESPACE
-#endif
+// #endif

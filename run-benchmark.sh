@@ -33,4 +33,4 @@ sudo mv db_bench tools/
 cd tools
 
 # Run benchmark
-yes | ./benchmark.sh seqkeystimestamps
+yes | ./benchmark.sh updaterandom
