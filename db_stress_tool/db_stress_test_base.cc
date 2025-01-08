@@ -423,6 +423,15 @@ bool StressTest::BuildOptionsTable() {
             "{{temperature=kCold;age=100}}", "{}"});
   }
 
+  // NOTE: allow -1 to mean starting disabled but dynamically changing
+  // But 0 means tiering is disabled for the entire run.
+  if (FLAGS_preclude_last_level_data_seconds != 0) {
+    options_tbl.emplace("preclude_last_level_data_seconds",
+                        std::vector<std::string>{"0", "5", "30", "5000"});
+  }
+  options_tbl.emplace("preserve_internal_time_seconds",
+                      std::vector<std::string>{"0", "5", "30", "5000"});
+
   options_table_ = std::move(options_tbl);
 
   for (const auto& iter : options_table_) {
@@ -805,8 +814,9 @@ void StressTest::ProcessRecoveredPreparedTxnsHelper(Transaction* txn,
   }
 }
 
-Status StressTest::NewTxn(WriteOptions& write_opts,
-                          std::unique_ptr<Transaction>* out_txn) {
+Status StressTest::NewTxn(WriteOptions& write_opts, ThreadState* thread,
+                          std::unique_ptr<Transaction>* out_txn,
+                          bool* commit_bypass_memtable) {
   if (!FLAGS_use_txn) {
     return Status::InvalidArgument("NewTxn when FLAGS_use_txn is not set");
   }
@@ -821,6 +831,15 @@ Status StressTest::NewTxn(WriteOptions& write_opts,
         FLAGS_use_only_the_last_commit_time_batch_for_recovery;
     txn_options.lock_timeout = 600000;  // 10 min
     txn_options.deadlock_detect = true;
+    if (FLAGS_commit_bypass_memtable_one_in > 0) {
+      assert(FLAGS_txn_write_policy == 0);
+      assert(FLAGS_user_timestamp_size == 0);
+      txn_options.commit_bypass_memtable =
+          thread->rand.OneIn(FLAGS_commit_bypass_memtable_one_in);
+      if (commit_bypass_memtable) {
+        *commit_bypass_memtable = txn_options.commit_bypass_memtable;
+      }
+    }
     out_txn->reset(txn_db_->BeginTransaction(write_opts, txn_options));
     auto istr = std::to_string(txn_id.fetch_add(1));
     Status s = (*out_txn)->SetName("xid" + istr);
@@ -876,11 +895,12 @@ Status StressTest::CommitTxn(Transaction& txn, ThreadState* thread) {
   return s;
 }
 
-Status StressTest::ExecuteTransaction(
-    WriteOptions& write_opts, ThreadState* thread,
-    std::function<Status(Transaction&)>&& ops) {
+Status StressTest::ExecuteTransaction(WriteOptions& write_opts,
+                                      ThreadState* thread,
+                                      std::function<Status(Transaction&)>&& ops,
+                                      bool* commit_bypass_memtable) {
   std::unique_ptr<Transaction> txn;
-  Status s = NewTxn(write_opts, &txn);
+  Status s = NewTxn(write_opts, thread, &txn, commit_bypass_memtable);
   std::string try_again_messages;
   if (s.ok()) {
     for (int tries = 1;; ++tries) {
@@ -3461,8 +3481,9 @@ void StressTest::Open(SharedState* shared, bool reopen) {
     }
 
     options_.listeners.clear();
-    options_.listeners.emplace_back(new DbStressListener(
-        FLAGS_db, options_.db_paths, cf_descriptors, db_stress_listener_env));
+    options_.listeners.emplace_back(
+        new DbStressListener(FLAGS_db, options_.db_paths, cf_descriptors,
+                             db_stress_listener_env, shared));
     RegisterAdditionalListeners();
 
     // If this is for DB reopen,  error injection may have been enabled.
@@ -3701,6 +3722,15 @@ void StressTest::Open(SharedState* shared, bool reopen) {
 
   if (!s.ok()) {
     fprintf(stderr, "open error: %s\n", s.ToString().c_str());
+    exit(1);
+  }
+
+  if (db_->GetLatestSequenceNumber() < shared->GetPersistedSeqno()) {
+    fprintf(stderr,
+            "DB of latest sequence number %" PRIu64
+            "did not recover to the persisted "
+            "sequence number %" PRIu64 " from last DB session\n",
+            db_->GetLatestSequenceNumber(), shared->GetPersistedSeqno());
     exit(1);
   }
 }
@@ -4106,6 +4136,7 @@ void InitializeOptionsFromFlags(
   options.level_compaction_dynamic_level_bytes =
       FLAGS_level_compaction_dynamic_level_bytes;
   options.track_and_verify_wals_in_manifest = true;
+  options.track_and_verify_wals = FLAGS_track_and_verify_wals;
   options.verify_sst_unique_id_in_manifest =
       FLAGS_verify_sst_unique_id_in_manifest;
   options.memtable_protection_bytes_per_key =
@@ -4178,8 +4209,9 @@ void InitializeOptionsFromFlags(
       exit(1);
     }
   }
+  // NOTE: allow -1 to mean starting disabled but dynamically changing
   options.preclude_last_level_data_seconds =
-      FLAGS_preclude_last_level_data_seconds;
+      std::max(FLAGS_preclude_last_level_data_seconds, int64_t{0});
   options.preserve_internal_time_seconds = FLAGS_preserve_internal_time_seconds;
 
   switch (FLAGS_rep_factory) {

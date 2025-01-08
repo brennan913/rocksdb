@@ -3,7 +3,6 @@
 //  COPYING file in the root directory) and Apache 2.0 License
 //  (found in the LICENSE.Apache file in the root directory).
 
-
 #include "db/compaction/compaction_job.h"
 
 #include <algorithm>
@@ -678,7 +677,7 @@ class CompactionJobTestBase : public testing::Test {
         full_history_ts_low_);
     VerifyInitializationOfCompactionJobStats(compaction_job_stats_);
 
-    compaction_job.Prepare();
+    compaction_job.Prepare(std::nullopt /*subcompact to be computed*/);
     mutex_.Unlock();
     Status s = compaction_job.Run();
     ASSERT_OK(s);
@@ -1536,14 +1535,11 @@ TEST_F(CompactionJobTest, VerifyPenultimateLevelOutput) {
       /*verify_func=*/[&](Compaction& comp) {
         for (char c = 'a'; c <= 'z'; c++) {
           if (c == 'a') {
-            ParsedInternalKey pik("a", 0U, kTypeValue);
-            ASSERT_FALSE(comp.WithinPenultimateLevelOutputRange(pik));
+            comp.TEST_AssertWithinPenultimateLevelOutputRange(
+                "a", true /*expect_failure*/);
           } else {
             std::string c_str{c};
-            // WithinPenultimateLevelOutputRange checks internal key range.
-            // 'z' is the last key, so set seqno properly.
-            ParsedInternalKey pik(c_str, c == 'z' ? 12U : 0U, kTypeValue);
-            ASSERT_TRUE(comp.WithinPenultimateLevelOutputRange(pik));
+            comp.TEST_AssertWithinPenultimateLevelOutputRange(c_str);
           }
         }
       });
@@ -1900,8 +1896,8 @@ TEST_F(CompactionJobTest, CutToSkipGrandparentFile) {
   const std::vector<int> input_levels = {0, 1};
   auto lvl0_files = cfd_->current()->storage_info()->LevelFiles(0);
   auto lvl1_files = cfd_->current()->storage_info()->LevelFiles(1);
-    RunCompaction({lvl0_files, lvl1_files}, input_levels,
-                  {expected_file1, expected_file2});
+  RunCompaction({lvl0_files, lvl1_files}, input_levels,
+                {expected_file1, expected_file2});
 }
 
 TEST_F(CompactionJobTest, CutToAlignGrandparentBoundary) {
@@ -1975,8 +1971,8 @@ TEST_F(CompactionJobTest, CutToAlignGrandparentBoundary) {
   const std::vector<int> input_levels = {0, 1};
   auto lvl0_files = cfd_->current()->storage_info()->LevelFiles(0);
   auto lvl1_files = cfd_->current()->storage_info()->LevelFiles(1);
-    RunCompaction({lvl0_files, lvl1_files}, input_levels,
-                  {expected_file1, expected_file2});
+  RunCompaction({lvl0_files, lvl1_files}, input_levels,
+                {expected_file1, expected_file2});
 }
 
 TEST_F(CompactionJobTest, CutToAlignGrandparentBoundarySameKey) {
@@ -2037,8 +2033,8 @@ TEST_F(CompactionJobTest, CutToAlignGrandparentBoundarySameKey) {
   for (int i = 80; i <= 100; i++) {
     snapshots.emplace_back(i);
   }
-    RunCompaction({lvl0_files, lvl1_files}, input_levels,
-                  {expected_file1, expected_file2}, snapshots);
+  RunCompaction({lvl0_files, lvl1_files}, input_levels,
+                {expected_file1, expected_file2}, snapshots);
 }
 
 TEST_F(CompactionJobTest, CutForMaxCompactionBytesSameKey) {

@@ -418,10 +418,19 @@ Status DBImpl::ResumeImpl(DBRecoverContext context) {
     }
   }
 
+  JobContext job_context(0);
+  FindObsoleteFiles(&job_context, true);
+  mutex_.Unlock();
+  // If DB shutdown initiated here, it will wait for this ongoing recovery.
+  job_context.manifest_file_number = 1;
+  if (job_context.HaveSomethingToDelete()) {
+    PurgeObsoleteFiles(job_context);
+  }
+  job_context.Clean();
+  mutex_.Lock();
+
   if (s.ok()) {
-    // This will notify and unblock threads waiting for error recovery to
-    // finish. Those previouly waiting threads can now proceed, which may
-    // include closing the db.
+    // Will notify and unblock threads waiting for error recovery to finish.
     s = error_handler_.ClearBGError();
   } else {
     // NOTE: this is needed to pass ASSERT_STATUS_CHECKED
@@ -430,15 +439,6 @@ Status DBImpl::ResumeImpl(DBRecoverContext context) {
     error_handler_.GetRecoveryError().PermitUncheckedError();
   }
 
-  JobContext job_context(0);
-  FindObsoleteFiles(&job_context, true);
-  mutex_.Unlock();
-  job_context.manifest_file_number = 1;
-  if (job_context.HaveSomethingToDelete()) {
-    PurgeObsoleteFiles(job_context);
-  }
-  job_context.Clean();
-
   if (s.ok()) {
     ROCKS_LOG_INFO(immutable_db_options_.info_log, "Successfully resumed DB");
   } else {
@@ -446,7 +446,6 @@ Status DBImpl::ResumeImpl(DBRecoverContext context) {
                    s.ToString().c_str());
   }
 
-  mutex_.Lock();
   // Check for shutdown again before scheduling further compactions,
   // since we released and re-acquired the lock above
   if (shutdown_initiated_) {
@@ -540,8 +539,8 @@ Status DBImpl::CloseHelper() {
   // continuing with the shutdown
   mutex_.Lock();
   shutdown_initiated_ = true;
-  error_handler_.CancelErrorRecovery();
-  while (error_handler_.IsRecoveryInProgress()) {
+  error_handler_.CancelErrorRecoveryForShutDown();
+  while (!error_handler_.ReadyForShutdown()) {
     bg_cv_.Wait();
   }
   mutex_.Unlock();
@@ -1300,11 +1299,15 @@ Status DBImpl::SetOptions(
       VersionEdit dummy_edit;
       s = versions_->LogAndApply(cfd, new_options, read_options, write_options,
                                  &dummy_edit, &mutex_, directories_.GetDbDir());
+      if (!versions_->io_status().ok()) {
+        assert(!s.ok());
+        error_handler_.SetBGError(versions_->io_status(),
+                                  BackgroundErrorReason::kManifestWrite);
+      }
       // Trigger possible flush/compactions. This has to be before we persist
       // options to file, otherwise there will be a deadlock with writer
       // thread.
       InstallSuperVersionAndScheduleWork(cfd, &sv_context, new_options);
-
       persist_options_status =
           WriteOptionsFile(write_options, true /*db_mutex_already_held*/);
       bg_cv_.SignalAll();
@@ -2098,7 +2101,8 @@ InternalIterator* DBImpl::NewInternalIterator(
   // Collect iterator for mutable memtable
   auto mem_iter = super_version->mem->NewIterator(
       read_options, super_version->GetSeqnoToTimeMapping(), arena,
-      super_version->mutable_cf_options.prefix_extractor.get());
+      super_version->mutable_cf_options.prefix_extractor.get(),
+      /*for_flush=*/false);
   Status s;
   if (!read_options.ignore_range_deletions) {
     std::unique_ptr<TruncatedRangeDelIterator> mem_tombstone_iter;
@@ -5896,6 +5900,7 @@ Status DBImpl::IngestExternalFile(
 
 Status DBImpl::IngestExternalFiles(
     const std::vector<IngestExternalFileArg>& args) {
+  PERF_TIMER_GUARD(file_ingestion_nanos);
   // TODO: plumb Env::IOActivity, Env::IOPriority
   const WriteOptions write_options;
 
@@ -6040,6 +6045,7 @@ Status DBImpl::IngestExternalFiles(
     if (two_write_queues_) {
       nonmem_write_thread_.EnterUnbatched(&nonmem_w, &mutex_);
     }
+    PERF_TIMER_GUARD(file_ingestion_blocking_live_writes_nanos);
 
     // When unordered_write is enabled, the keys are writing to memtable in an
     // unordered way. If the ingestion job checks memtable key range before the
@@ -6202,6 +6208,7 @@ Status DBImpl::IngestExternalFiles(
       nonmem_write_thread_.ExitUnbatched(&nonmem_w);
     }
     write_thread_.ExitUnbatched(&w);
+    PERF_TIMER_STOP(file_ingestion_blocking_live_writes_nanos);
 
     if (status.ok()) {
       for (auto& job : ingestion_jobs) {
@@ -6805,17 +6812,24 @@ void DBImpl::RecordSeqnoToTimeMapping(uint64_t populate_historical_seconds) {
   // for SeqnoToTimeMapping. We don't know how long it has been since the last
   // sequence number was written, so we at least have a one-sided bound by
   // sampling in this order.
-  SequenceNumber seqno = GetLatestSequenceNumber();
-  int64_t unix_time_signed = 0;
-  immutable_db_options_.clock->GetCurrentTime(&unix_time_signed)
-      .PermitUncheckedError();  // Ignore error
-  uint64_t unix_time = static_cast<uint64_t>(unix_time_signed);
-
+  // ALSO, to avoid out-of-order mappings, we need to get the seqno and times
+  // while holding the DB mutex. (This is really to make testing happy because
+  // it's fine to throw out extra close-but-not-quite-consistent mappings in
+  // production.)
   std::vector<SuperVersionContext> sv_contexts;
-  if (populate_historical_seconds > 0) {
-    bool success = true;
-    {
-      InstrumentedMutexLock l(&mutex_);
+  bool success = true;
+  SequenceNumber seqno;
+  uint64_t unix_time;
+  {
+    InstrumentedMutexLock l(&mutex_);
+
+    seqno = GetLatestSequenceNumber();
+    int64_t unix_time_signed = 0;
+    immutable_db_options_.clock->GetCurrentTime(&unix_time_signed)
+        .PermitUncheckedError();  // Ignore error
+    unix_time = static_cast<uint64_t>(unix_time_signed);
+
+    if (populate_historical_seconds > 0) {
       if (seqno > 1 && unix_time > populate_historical_seconds) {
         // seqno=0 is reserved
         SequenceNumber from_seqno = 1;
@@ -6829,7 +6843,20 @@ void DBImpl::RecordSeqnoToTimeMapping(uint64_t populate_historical_seconds) {
         assert(unix_time > populate_historical_seconds);
         success = false;
       }
+    } else {
+      // FIXME: assert(seqno > 0);
+      // Always successful assuming seqno never go backwards
+      seqno_to_time_mapping_.Append(seqno, unix_time);
+      InstallSeqnoToTimeMappingInSV(&sv_contexts);
     }
+  }
+
+  // clean up & report outside db mutex
+  for (SuperVersionContext& sv_context : sv_contexts) {
+    sv_context.Clean();
+  }
+
+  if (populate_historical_seconds > 0) {
     if (success) {
       ROCKS_LOG_INFO(
           immutable_db_options_.info_log,
@@ -6844,16 +6871,7 @@ void DBImpl::RecordSeqnoToTimeMapping(uint64_t populate_historical_seconds) {
           seqno, unix_time - populate_historical_seconds, unix_time);
     }
   } else {
-    InstrumentedMutexLock l(&mutex_);
-    // FIXME: assert(seqno > 0);
-    // Always successful assuming seqno never go backwards
-    seqno_to_time_mapping_.Append(seqno, unix_time);
-    InstallSeqnoToTimeMappingInSV(&sv_contexts);
-  }
-
-  // clean up outside db mutex
-  for (SuperVersionContext& sv_context : sv_contexts) {
-    sv_context.Clean();
+    assert(success);
   }
 }
 

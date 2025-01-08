@@ -847,6 +847,10 @@ DEFINE_bool(allow_unprepared_value,
             ROCKSDB_NAMESPACE::ReadOptions().allow_unprepared_value,
             "Allow lazy loading of values for range scans");
 
+DEFINE_bool(track_and_verify_wals,
+            ROCKSDB_NAMESPACE::Options().track_and_verify_wals,
+            "See Options::track_and_verify_wals");
+
 static bool ValidateInt32Percent(const char* flagname, int32_t value) {
   if (value < 0 || value > 100) {
     fprintf(stderr, "Invalid value for --%s: %d, 0<= pct <=100 \n", flagname,
@@ -1469,4 +1473,7 @@ DEFINE_bool(paranoid_memory_checks,
             ROCKSDB_NAMESPACE::Options().paranoid_memory_checks,
             "Sets CF option paranoid_memory_checks.");
 
+DEFINE_uint32(commit_bypass_memtable_one_in, 0,
+              "If greater than zero, transaction option will set "
+              "commit_bypass_memtable to per every N transactions on average.");
 #endif  // GFLAGS

@@ -773,9 +773,6 @@ DEFINE_uint64(compaction_readahead_size,
 
 DEFINE_int32(log_readahead_size, 0, "WAL and manifest readahead size");
 
-DEFINE_int32(random_access_max_buffer_size, 1024 * 1024,
-             "Maximum windows randomaccess buffer size");
-
 DEFINE_int32(writable_file_max_buffer_size, 1024 * 1024,
              "Maximum write buffer for Writable File");
 
@@ -1087,7 +1084,6 @@ DEFINE_string(
 static enum ROCKSDB_NAMESPACE::CompressionType
     FLAGS_blob_db_compression_type_e = ROCKSDB_NAMESPACE::kSnappyCompression;
 
-
 // Integrated BlobDB options
 DEFINE_bool(
     enable_blob_files,
@@ -1158,7 +1154,6 @@ DEFINE_int32(prepopulate_blob_cache, 0,
              "[Integrated BlobDB] Pre-populate hot/warm blobs in blob cache. 0 "
              "to disable and 1 to insert during flush.");
 
-
 // Secondary DB instance Options
 DEFINE_bool(use_secondary_db, false,
             "Open a RocksDB secondary instance. A primary instance can be "
@@ -1183,7 +1178,6 @@ DEFINE_bool(report_bg_io_stats, false,
 
 DEFINE_bool(use_stderr_info_logger, false,
             "Write info logs to stderr instead of to LOG file. ");
-
 
 DEFINE_string(trace_file, "", "Trace workload to a file. ");
 
@@ -1823,6 +1817,8 @@ DEFINE_bool(build_info, false,
 DEFINE_bool(track_and_verify_wals_in_manifest, false,
             "If true, enable WAL tracking in the MANIFEST");
 
+DEFINE_bool(track_and_verify_wals, false, "See Options.track_and_verify_wals");
+
 namespace ROCKSDB_NAMESPACE {
 namespace {
 static Status CreateMemTableRepFactory(
@@ -2013,11 +2009,7 @@ struct DBWithColumnFamilies {
   std::vector<int> cfh_idx_to_prob;  // ith index holds probability of operating
                                      // on cfh[i].
 
-  DBWithColumnFamilies()
-      : db(nullptr)
-        ,
-        opt_txn_db(nullptr)
-  {
+  DBWithColumnFamilies() : db(nullptr), opt_txn_db(nullptr) {
     cfh.clear();
     num_created = 0;
     num_hot = 0;
@@ -2029,8 +2021,7 @@ struct DBWithColumnFamilies {
         opt_txn_db(other.opt_txn_db),
         num_created(other.num_created.load()),
         num_hot(other.num_hot),
-        cfh_idx_to_prob(other.cfh_idx_to_prob) {
-  }
+        cfh_idx_to_prob(other.cfh_idx_to_prob) {}
 
   void DeleteDBs() {
     std::for_each(cfh.begin(), cfh.end(),
@@ -4402,7 +4393,6 @@ class Benchmark {
     options.max_file_opening_threads = FLAGS_file_opening_threads;
     options.compaction_readahead_size = FLAGS_compaction_readahead_size;
     options.log_readahead_size = FLAGS_log_readahead_size;
-    options.random_access_max_buffer_size = FLAGS_random_access_max_buffer_size;
     options.writable_file_max_buffer_size = FLAGS_writable_file_max_buffer_size;
     options.use_fsync = FLAGS_use_fsync;
     options.num_levels = FLAGS_num_levels;
@@ -4818,6 +4808,7 @@ class Benchmark {
     options.allow_data_in_errors = FLAGS_allow_data_in_errors;
     options.track_and_verify_wals_in_manifest =
         FLAGS_track_and_verify_wals_in_manifest;
+    options.track_and_verify_wals = FLAGS_track_and_verify_wals;
 
     // Integrated BlobDB
     options.enable_blob_files = FLAGS_enable_blob_files;
@@ -8709,7 +8700,6 @@ class Benchmark {
     }
   }
 
-
   void Replay(ThreadState* thread) {
     if (db_.db != nullptr) {
       Replay(thread, &db_);
@@ -8797,7 +8787,6 @@ class Benchmark {
     assert(s.ok());
     delete backup_engine;
   }
-
 };
 
 int db_bench_tool(int argc, char** argv) {

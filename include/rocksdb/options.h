@@ -531,25 +531,6 @@ class CompactionService : public Customizable {
   virtual void OnInstallation(const std::string& /*scheduled_job_id*/,
                               CompactionServiceJobStatus /*status*/) {}
 
-  // Deprecated. Please implement Schedule() and Wait() API to handle remote
-  // compaction
-
-  // Start the remote compaction with `compaction_service_input`, which can be
-  // passed to `DB::OpenAndCompact()` on the remote side. `info` provides the
-  // information the user might want to know, which includes `job_id`.
-  virtual CompactionServiceJobStatus StartV2(
-      const CompactionServiceJobInfo& /*info*/,
-      const std::string& /*compaction_service_input*/) {
-    return CompactionServiceJobStatus::kUseLocal;
-  }
-
-  // Wait for remote compaction to finish.
-  virtual CompactionServiceJobStatus WaitForCompleteV2(
-      const CompactionServiceJobInfo& /*info*/,
-      std::string* /*compaction_service_result*/) {
-    return CompactionServiceJobStatus::kUseLocal;
-  }
-
   ~CompactionService() override = default;
 };
 
@@ -590,11 +571,19 @@ struct DBOptions {
   // Default: false
   bool error_if_exists = false;
 
-  // If true, RocksDB will aggressively check consistency of the data.
-  // Also, if any of the  writes to the database fails (Put, Delete, Merge,
-  // Write), the database will switch to read-only mode and fail all other
-  // Write operations.
-  // In most cases you want this to be set to true.
+  // If true, RocksDB does some pro-active and generally inexpensive checks
+  // for DB or data corruption, on top of usual protections such as block
+  // checksums. True also enters a read-only mode when a DB write fails;
+  // see DB::Resume().
+  //
+  // As most workloads value data correctness over availability, this option
+  // is on by default. Note that the name of this old option is potentially
+  // misleading, and other options and operations go further in proactive
+  // checking for corruption, including
+  // * paranoid_file_checks
+  // * paranoid_memory_checks
+  // * DB::VerifyChecksum()
+  //
   // Default: true
   bool paranoid_checks = true;
 
@@ -642,6 +631,26 @@ struct DBOptions {
   //
   // Default: false
   bool track_and_verify_wals_in_manifest = false;
+
+  // EXPERIMENTAL
+  //
+  // If true, each new WAL will record various information about its predecessor
+  // WAL for verification on the predecessor WAL during WAL recovery.
+  //
+  // It verifies the following:
+  // 1. There exists at least some WAL in the DB
+  // - It's not compatible with `RepairDB()` since this option imposes a
+  // stricter requirement on WAL than the DB went through `RepariDB()` can
+  // normally meet
+  // 2. There exists no WAL hole where new WAL data presents while some old WAL
+  // data not yet obsolete is missing. The DB manifest indicates which WALs are
+  // obsolete.
+  //
+  // This is intended to be a better replacement to
+  // `track_and_verify_wals_in_manifest`.
+  //
+  // Default: false
+  bool track_and_verify_wals = false;
 
   // If true, verifies the SST unique id between MANIFEST and actual file
   // each time an SST file is opened. This check ensures an SST file is not
@@ -1055,23 +1064,6 @@ struct DBOptions {
   //
   // Dynamically changeable through SetDBOptions() API.
   size_t compaction_readahead_size = 2 * 1024 * 1024;
-
-  // This is a maximum buffer size that is used by WinMmapReadableFile in
-  // unbuffered disk I/O mode. We need to maintain an aligned buffer for
-  // reads. We allow the buffer to grow until the specified value and then
-  // for bigger requests allocate one shot buffers. In unbuffered mode we
-  // always bypass read-ahead buffer at ReadaheadRandomAccessFile
-  // When read-ahead is required we then make use of compaction_readahead_size
-  // value and always try to read ahead. With read-ahead we always
-  // pre-allocate buffer to the size instead of growing it up to a limit.
-  //
-  // This option is currently honored only on Windows
-  //
-  // Default: 1 Mb
-  //
-  // Special value: 0 - means do not maintain per instance buffer. Allocate
-  //                per request buffer and avoid locking.
-  size_t random_access_max_buffer_size = 1024 * 1024;
 
   // This is the maximum buffer size that is used by WritableFileWriter.
   // With direct IO, we need to maintain an aligned buffer for writes.

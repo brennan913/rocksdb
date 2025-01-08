@@ -134,9 +134,6 @@ struct EnvOptions {
   size_t compaction_readahead_size = 0;
 
   // See DBOptions doc
-  size_t random_access_max_buffer_size = 0;
-
-  // See DBOptions doc
   size_t writable_file_max_buffer_size = 1024 * 1024;
 
   // If not nullptr, write rate limiting is enabled for flush and compaction
@@ -458,6 +455,7 @@ class Env : public Customizable {
     kVerifyFileChecksums = 7,
     kGetEntity = 8,
     kMultiGetEntity = 9,
+    kReadManifest = 10,
     kUnknown,  // Keep last for easy array of non-unknowns
   };
 
